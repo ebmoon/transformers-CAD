@@ -86,6 +86,7 @@ class GenerationMode(ExplicitEnum):
     SAMPLE = "sample"
     ASSISTED_GENERATION = "assisted_generation"
     DOLA_GENERATION = "dola_generation"
+    CHECKER_GUIDED = "checker_guided"
     # Beam methods
     BEAM_SEARCH = "beam_search"
     BEAM_SAMPLE = "beam_sample"
@@ -449,6 +450,11 @@ class GenerationConfig(PushToHubMixin):
         self.encoder_no_repeat_ngram_size = kwargs.pop("encoder_no_repeat_ngram_size", 0)
         self.decoder_start_token_id = kwargs.pop("decoder_start_token_id", None)
 
+        # Checker guided generation
+        self.checker = kwargs.pop("checker", None)
+        self.jump_forward = kwargs.pop("jump_forward", True)
+        self.backtrack = kwargs.pop("backtrack", True)
+
         # Assistant generation
         self.is_assistant = False
         self.num_assistant_tokens = kwargs.pop("num_assistant_tokens", 20)
@@ -510,7 +516,9 @@ class GenerationConfig(PushToHubMixin):
         """
         # TODO joao: find out a way of not depending on external fields (e.g. `assistant_model`), then make this a
         # property and part of the `__repr__`
-        if self.constraints is not None or self.force_words_ids is not None:
+        if self.checker is not None:
+            generation_mode = GenerationMode.CHECKER_GUIDED
+        elif self.constraints is not None or self.force_words_ids is not None:
             generation_mode = GenerationMode.CONSTRAINED_BEAM_SEARCH
         elif self.num_beams == 1:
             if self.do_sample is False:
