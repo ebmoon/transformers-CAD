@@ -454,6 +454,8 @@ class GenerationConfig(PushToHubMixin):
         self.checker = kwargs.pop("checker", None)
         self.jump_forward = kwargs.pop("jump_forward", True)
         self.backtrack = kwargs.pop("backtrack", True)
+        self.adaptive_mask = kwargs.pop("adaptive_mask", True)
+        self.adaptive_trie = kwargs.pop("adaptive_trie", None)
 
         # Assistant generation
         self.is_assistant = False

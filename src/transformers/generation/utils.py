@@ -60,6 +60,7 @@ from .candidate_generator import (
     _prepare_token_type_ids,
 )
 from .checker import Checker
+from .checker_utils import AdaptiveMaskTrie, AdaptiveMaskTrieNode
 from .configuration_utils import (
     NEED_SETUP_CACHE_CLASSES_MAPPING,
     QUANT_BACKEND_CLASSES_MAPPING,
@@ -4238,8 +4239,15 @@ class GenerationMixin:
         max_length = generation_config.max_length
         has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
         do_sample = generation_config.do_sample
+
         jump_forward = generation_config.jump_forward
         backtrack = generation_config.backtrack
+        adaptive_mask = generation_config.adaptive_mask
+
+        # if the mask is adaptive, initialize adaptive trie
+        if adaptive_mask:
+            adaptive_trie = generation_config.adaptive_trie if generation_config.adaptive_trie else AdaptiveMaskTrie()
+            current_trie_node = adaptive_trie.root
 
         # init attention / hidden states / scores tuples
         scores = () if (return_dict_in_generate and output_scores) else None
@@ -4264,24 +4272,26 @@ class GenerationMixin:
         is_first_iteration = True # to preserve the same API in the output as other generation methods
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
             cur_len = input_ids.shape[-1]
-            
+
             # 1. Check acceptable next tokens by checker
             acceptance = checker.filter_vocab(input_ids)
-            
+            acceptance_sequence = acceptance.clone()[:, None, :]
+
             # 2. Jump-forward if only a single next token is acceptable
             jumped_len = 0
-            while jump_forward and input_ids.shape[-1] < max_length - 1 and acceptance.shape[1] == 1:
+            while jump_forward and input_ids.shape[-1] < max_length - 1 and acceptance.shape[-1] == 1:
                 jumped_input_ids = torch.cat([input_ids, acceptance], dim=-1)
                 is_done = stopping_criteria(jumped_input_ids, None)
 
                 # 2.1. Do not apply jump-forward for the last token
-                # to compute the original logits for jump-forwarded tokens
+                # to compute original logits for jump-forwarded tokens
                 if not is_done:
                     input_ids = jumped_input_ids
 
                     checker.update(acceptance[:, 0])
                     acceptance = checker.filter_vocab(input_ids)
-                    
+                    acceptance_sequence = torch.concat([acceptance_sequence, acceptance], dim=1)
+
                     jumped_len += 1
 
             # prepare model inputs
@@ -4305,20 +4315,41 @@ class GenerationMixin:
 
             # 3. Process the new logits
             # .float() is needed to retain precision for later logits manipulations
-            new_logits = outputs.logits[:, cur_len:].float()
+            new_logits = outputs.logits[:, cur_len:, :].float()
             new_logits = new_logits.to(input_ids.device)
             next_token_logits = new_logits.clone()
+            
+            # 3.1. If the masking is adaptive, get mask from trie
+            vocab_size = new_logits.shape(-1)
+            if adaptive_mask:
+                # Apply binary mask for jump-forwarded tokens
+                for i in range(jumped_len):
+                    acceptance = acceptance_sequence[:, i, :]
+                    new_logits[:, i, ~acceptance] = -float('inf')
+            
+                # Apply adaptive mask for the last token
+                mask = current_trie_node.get_mask(batch_size, vocab_size)
+                mask = mask.to(input_ids.device)
+                new_logits[:, -1, :] += mask
 
-            # pre-process distribution
-            next_token_scores = logits_processor(input_ids, next_token_logits)
+            # 3.2. If the masking is not adaptive, apply binary mask to logits.
+            else:
+                for i in range(jumped_len + 1):
+                    acceptance = acceptance_sequence[:, i, :]
+                    new_logits[:, i, ~acceptance] = -float('inf')
+
+            # process logits by logits processors
+            if len(logits_processor) > 0:
+                for i in range(jumped_len + 1):
+                    new_logits[:, i, :] = logits_processor(input_ids[:, : cur_len + i], new_logits[:, i, :])
 
             # token selection
             if do_sample:
-                probs = nn.functional.softmax(next_token_scores, dim=-1)
+                probs = nn.functional.softmax(new_logits, dim=-1)
                 # TODO (joao): this OP throws "skipping cudagraphs due to ['incompatible ops']", find solution
                 next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
             else:
-                next_tokens = torch.argmax(next_token_scores, dim=-1)
+                next_tokens = torch.argmax(new_logits, dim=-1)
 
             # finished sentences should have their next token be a padding token
             if has_eos_stopping_criteria:

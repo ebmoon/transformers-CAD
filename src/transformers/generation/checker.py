@@ -21,8 +21,8 @@ class Checker:
                 Indices of input sequence tokens in the vocabulary. [What are input IDs?](../glossary#input-ids)
 
         Return:
-            `torch.LongTensor` of shape `(batch_size, num_accepted_tokens)` containing the accepted tokens
-            for each batch.
+            `torch.LongTensor` of shape `(batch_size, num_accepted_tokens)` containing indices of 
+            acceptable next tokens for each batch.
         """
         raise NotImplementedError(
             f"{self.__class__} is an abstract class. Only classes inheriting this class can call `filter_vocab`."
